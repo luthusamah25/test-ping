@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>TEST ping</title>
+<style>
+  :root{--bg:#0f172a;--card:#0b1220;--muted:#94a3b8;--accent:#06b6d4;--success:#10b981;--danger:#ef4444}
+  html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial;background:linear-gradient(180deg,#021028 0%, #041226 100%);color:#e6eef6}
+  .wrap{max-width:920px;margin:28px auto;padding:22px;background:rgba(255,255,255,0.03);border-radius:12px;box-shadow:0 6px 30px rgba(2,6,23,0.6)}
+  h1{margin:0 0 10px;font-size:20px}
+  p.lead{margin:0 0 18px;color:var(--muted)}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  input[type=text], input[type=number], select{background:transparent;border:1px solid rgba(255,255,255,0.06);padding:8px 10px;border-radius:8px;color:inherit}
+  button{background:var(--accent);border:none;padding:8px 12px;border-radius:8px;color:#012;cursor:pointer;font-weight:600}
+  button.stop{background:var(--danger);color:#fff}
+  .stats{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+  .card{background:rgba(255,255,255,0.02);padding:12px;border-radius:10px;min-width:120px}
+  table{width:100%;border-collapse:collapse;margin-top:12px}
+  th,td{padding:8px 6px;text-align:left;border-bottom:1px dashed rgba(255,255,255,0.03);font-size:14px}
+  .status-up{color:var(--success);font-weight:700}
+  .status-down{color:var(--danger);font-weight:700}
+  .small{font-size:12px;color:var(--muted)}
+  .controls .col{display:flex;gap:8px;align-items:center}
+  .history{max-height:300px;overflow:auto;margin-top:12px;border-radius:8px;padding:6px;background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent)}
+  .spark{height:36px}
+  footer{margin-top:18px;color:var(--muted);font-size:13px}
+  @media (max-width:560px){.controls{flex-direction:column}}
+</style>
+</head>
+<body>
+  <div class="wrap" role="main">
+    <h1>TEST PING</h1>
+    <p class="lead">Mengukur latency HTTP (bukan ICMP). Jika browser memblokir CORS untuk metode HEAD/GET, script akan mencoba metode gambar sebagai fallback.</p>
+
+    <div class="controls">
+      <div class="col">
+        <label class="small" for="host">Host</label>
+        <input id="host" type="text" value="apijkn.bpjskesehatan.go.id" />
+      </div>
+
+      <div class="col">
+        <label class="small" for="count">Jumlah ping</label>
+        <input id="count" type="number" min="1" max="10000" value="10" />
+      </div>
+
+      <div class="col">
+        <label class="small" for="interval">Interval (ms)</label>
+        <input id="interval" type="number" min="100" max="60000" value="1000" />
+      </div>
+
+      <div class="col">
+        <label class="small" for="useFetch">Coba fetch HEAD</label>
+        <select id="useFetch" title="Metode"> 
+          <option value="auto" selected>auto (HEAD → image)</option>
+          <option value="fetch">force fetch HEAD</option>
+          <option value="image">force image fallback</option>
+        </select>
+      </div>
+
+      <div class="col">
+        <button id="startBtn">Start</button>
+        <button id="stopBtn" class="stop" disabled>Stop</button>
+      </div>
+
+      <div class="col" style="margin-left:auto">
+        <button id="exportCsv">Export CSV</button>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="card"><div class="small">Terkahir</div><div id="last" style="font-weight:700">—</div></div>
+      <div class="card"><div class="small">Rata-rata</div><div id="avg" style="font-weight:700">—</div></div>
+      <div class="card"><div class="small">Min</div><div id="min" style="font-weight:700">—</div></div>
+      <div class="card"><div class="small">Max</div><div id="max" style="font-weight:700">—</div></div>
+      <div class="card"><div class="small">Loss</div><div id="loss" style="font-weight:700">—</div></div>
+      <div class="card"><div class="small">Total</div><div id="total" style="font-weight:700">0</div></div>
+    </div>
+
+    <div class="history" aria-live="polite">
+      <table id="logTable" aria-describedby="logDesc">
+        <thead>
+          <tr><th>#</th><th>Waktu (local)</th><th>Metode</th><th>RTT (ms)</th><th>Status / Info</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <div id="logDesc" class="small">Riwayat ping.</div>
+    </div>
+
+    <footer>.</footer>
+  </div>
+
+<script>
+(function(){
+  const hostInput = document.getElementById('host');
+  const countInput = document.getElementById('count');
+  const intervalInput = document.getElementById('interval');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const useFetchSel = document.getElementById('useFetch');
+  const logTbody = document.querySelector('#logTable tbody');
+  const lastEl = document.getElementById('last');
+  const avgEl = document.getElementById('avg');
+  const minEl = document.getElementById('min');
+  const maxEl = document.getElementById('max');
+  const lossEl = document.getElementById('loss');
+  const totalEl = document.getElementById('total');
+  const exportCsvBtn = document.getElementById('exportCsv');
+
+  let running = false;
+  let seq = 0;
+  let results = []; // {i, time, ok, method, status, ts}
+
+  function nowLocal(){
+    return new Date().toLocaleString();
+  }
+
+  function updateStats(){
+    const total = results.length;
+    const received = results.filter(r=>r.ok).length;
+    const lost = total - received;
+    const lossPct = total ? Math.round((lost/total)*100) + '%' : '—';
+    const times = results.filter(r=>r.ok).map(r=>r.time);
+    const avg = times.length ? Math.round(times.reduce((a,b)=>a+b,0)/times.length) : '—';
+    const mn = times.length ? Math.min(...times) : '—';
+    const mx = times.length ? Math.max(...times) : '—';
+    lastEl.textContent = results.length ? (results[results.length-1].ok ? results[results.length-1].time + ' ms' : 'timeout/error') : '—';
+    avgEl.textContent = typeof avg === 'number' ? avg + ' ms' : '—';
+    minEl.textContent = typeof mn === 'number' ? mn + ' ms' : '—';
+    maxEl.textContent = typeof mx === 'number' ? mx + ' ms' : '—';
+    lossEl.textContent = lossPct;
+    totalEl.textContent = total;
+  }
+
+  function appendRow(r){
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.i}</td>
+      <td>${new Date(r.ts).toLocaleTimeString()}</td>
+      <td>${r.method}</td>
+      <td>${r.ok ? r.time + ' ms' : '-'}</td>
+      <td class="${r.ok ? 'status-up' : 'status-down'}">${r.info || (r.ok ? 'OK ('+r.status+')' : r.info)}</td>
+    `;
+    logTbody.insertBefore(tr, logTbody.firstChild);
+    // keep history to reasonable length
+    if(logTbody.children.length > 500) logTbody.removeChild(logTbody.lastChild);
+  }
+
+  async function pingOnce(host, prefer){
+    // prefer: 'fetch'|'image'|'auto'
+    const timeoutMs = 8000;
+    const cacheBust = Date.now() + Math.floor(Math.random()*1000);
+    if(prefer === 'image') return imagePing(host, cacheBust, timeoutMs);
+    if(prefer === 'fetch'){
+      const res = await fetchPing(host, cacheBust, timeoutMs);
+      if(res.status === 'CORS_ERROR' || res.status === 'FETCH_ERROR') {
+        // return as failure but include info
+        return res;
+      }
+      return res;
+    }
+    // auto: try fetch HEAD first, fallback to image on error
+    const res = await fetchPing(host, cacheBust, timeoutMs);
+    if(res.status === 'CORS_ERROR' || res.status === 'FETCH_ERROR'){
+      // fallback
+      const fallback = await imagePing(host, cacheBust, timeoutMs);
+      fallback.fallbackFrom = 'fetch';
+      return fallback;
+    }
+    return res;
+  }
+
+  async function fetchPing(host, cacheBust, timeoutMs){
+    const url = (host.startsWith('http') ? host : ('https://' + host)) + '/?_=' + cacheBust;
+    const start = performance.now();
+    let controller = new AbortController();
+    let timeout = setTimeout(()=> controller.abort(), timeoutMs);
+    try {
+      // try HEAD first (lightweight). Some servers may 405 -> then try GET.
+      let resp;
+      try {
+        resp = await fetch(url, {method:'HEAD', cache:'no-store', signal: controller.signal, mode:'cors'});
+      } catch (e) {
+        // could be TypeError for CORS or network or aborted
+        if(e.name === 'AbortError') {
+          clearTimeout(timeout);
+          return {ok:false, time:null, status:'TIMEOUT', method:'fetch (HEAD)', info:'timeout', ts:Date.now()};
+        }
+        // If HEAD fails maybe server disallows HEAD, retry GET
+        try {
+          resp = await fetch(url, {method:'GET', cache:'no-store', signal: controller.signal, mode:'cors'});
+        } catch (e2){
+          clearTimeout(timeout);
+          // differentiate CORS vs network
+          const info = (e2 instanceof TypeError) ? 'CORS or network error' : e2.message;
+          const status = (e2 instanceof TypeError) ? 'CORS_ERROR' : 'FETCH_ERROR';
+          return {ok:false, time:null, status:status, method:'fetch', info, ts:Date.now()};
+        }
+      }
+      const rtt = Math.round(performance.now() - start);
+      clearTimeout(timeout);
+      return {ok:true, time:rtt, status:resp.status, method:'fetch', info:resp.statusText || 'OK', ts:Date.now()};
+    } catch(err){
+      clearTimeout(timeout);
+      const info = err && err.name === 'AbortError' ? 'timeout' : (err && err.message) || 'error';
+      const status = (err instanceof TypeError) ? 'CORS_ERROR' : 'FETCH_ERROR';
+      return {ok:false, time:null, status, method:'fetch', info, ts:Date.now()};
+    }
+  }
+
+  function imagePing(host, cacheBust, timeoutMs){
+    return new Promise(resolve=>{
+      const img = new Image();
+      const url = (host.startsWith('http') ? host : ('https://' + host)) + '/favicon.ico?_=' + cacheBust;
+      const start = performance.now();
+      let done = false;
+      const t = setTimeout(()=> {
+        if(done) return;
+        done = true;
+        // if abort: consider it as failed (timeout)
+        resolve({ok:false,time:null,status:'TIMEOUT',method:'image',info:'timeout',ts:Date.now()});
+      }, timeoutMs);
+      img.onload = function(){
+        if(done) return;
+        done = true;
+        clearTimeout(t);
+        const rtt = Math.round(performance.now() - start);
+        resolve({ok:true,time:rtt,status:'loaded',method:'image',info:'onload',ts:Date.now()});
+      };
+      img.onerror = function(e){
+        if(done) return;
+        done = true;
+        clearTimeout(t);
+        // error still tells us server responded (maybe 404) but onerror triggers — treat as received with RTT
+        const rtt = Math.round(performance.now() - start);
+        resolve({ok:true,time:rtt,status:'error_loaded',method:'image',info:'onerror (resource failure)',ts:Date.now()});
+      };
+      // attach src last to start loading
+      try {
+        img.src = url;
+      } catch(e){
+        if(done) return;
+        done = true;
+        clearTimeout(t);
+        resolve({ok:false,time:null,status:'IMG_SET_ERROR',method:'image',info:e.message,ts:Date.now()});
+      }
+    });
+  }
+
+  async function startPinging(){
+    if(running) return;
+    running = true;
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    seq = 0;
+    results = [];
+    logTbody.innerHTML = '';
+    updateStats();
+
+    const host = hostInput.value.trim() || 'apijkn.bpjskesehatan.go.id';
+    const totalCount = Math.max(1, Math.min(100000, parseInt(countInput.value) || 10));
+    const intervalMs = Math.max(100, parseInt(intervalInput.value) || 1000);
+    const prefer = useFetchSel.value; // auto|fetch|image
+
+    for(let i=1;i<=totalCount;i++){
+      if(!running) break;
+      seq++;
+      try {
+        const res = await pingOnce(host, prefer);
+        const row = {i: seq, time: res.time, ok: !!res.ok, method: res.method, status: res.status, info: res.info || '', ts: res.ts};
+        results.push(row);
+        appendRow(row);
+        updateStats();
+      } catch(err){
+        const row = {i: seq, time: null, ok:false, method:'error', status:'ERROR', info: err && err.message || 'error', ts: Date.now()};
+        results.push(row);
+        appendRow(row);
+        updateStats();
+      }
+      // wait interval before next ping (unless last)
+      if(i < totalCount){
+        await new Promise(r => setTimeout(r, intervalMs));
+      }
+    }
+
+    running = false;
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  }
+
+  stopBtn.addEventListener('click', ()=> {
+    running = false;
+    stopBtn.disabled = true;
+    startBtn.disabled = false;
+  });
+
+  startBtn.addEventListener('click', ()=> startPinging());
+
+  exportCsvBtn.addEventListener('click', ()=>{
+    if(results.length === 0){
+      alert('Belum ada hasil untuk diekspor.');
+      return;
+    }
+    const rows = [['#','timestamp','method','ok','rtt_ms','status','info']];
+    results.forEach(r => rows.push([r.i,new Date(r.ts).toISOString(),r.method,r.ok ? '1' : '0', r.time === null ? '' : r.time, r.status, (r.info||'')]));
+    const csv = rows.map(r => r.map(c => ('"' + String(c).replace(/"/g,'""') + '"')).join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (hostInput.value || 'host') + '_ping_results.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  // quick keyboard enter on host -> start
+  hostInput.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') startPinging(); });
+
+})();
+</script>
+</body>
+</html>
